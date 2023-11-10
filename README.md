@@ -9,3 +9,4 @@ response = requests.get(url)
 # Save the data to a local file
 with open("titanic_data.csv", "wb") as f:
     f.write(response.content)
+
