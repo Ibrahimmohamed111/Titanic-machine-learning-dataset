@@ -1,0 +1,649 @@
+---
+title: "Would You Survive the Titanic?"
+subtitle: "A Complete Beginner's Guide to Dive into the Infamous Titanic Dataset"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# clear-up the environment
+# rm(list = ls())
+
+# chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 4,
+  fig.align = "center",
+  comment = "#>"
+)
+
+options(scipen = 999)
+```
+
+<style>
+body {
+text-align: justify}
+</style>
+
+-----
+
+<img src="https://images.unsplash.com/photo-1543470373-e055b73a8f29?ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&ixlib=rb-1.2.1&auto=format&fit=crop&w=1950&q=80">
+
+# Library
+
+```{r}
+library(tidyverse)      # collection of best packages
+library(caret)          # machine learning functions
+library(MLmetrics)      # machine learning metrics
+library(car)            # VIF calculation
+library(rpart)          # decision tree
+library(class)          # k-NN
+```
+
+# Problem Statement
+
+The sinking of the Titanic is one of the most infamous shipwrecks in history. On April 15, 1912, during her maiden voyage, the widely considered “unsinkable” RMS Titanic sank after colliding with an iceberg. Unfortunately, there weren’t enough lifeboats for everyone onboard, resulting in the death of 1502 out of 2224 passengers and crew. While there was some element of luck involved in surviving, it seems some groups of people were more likely to survive than others.
+
+In this project, we will build a predictive model that answers the question: “what sorts of people were more likely to survive?” using passenger data.
+
+# Dataset
+
+The dataset was obtained from [this notebook](https://www.kaggle.com/dwiuzila/attempting-a-perfect-score-learning-purpose-only). This dataset is created to duplicate the official train and test datasets from kaggle. Let's read them.
+
+```{r}
+train <- read.csv('../input/titanic-machine-learning-from-disaster/train.csv', na.strings=c('', 'NA'))
+test <- read.csv('../input/titanic-machine-learning-from-disaster/test.csv', na.strings=c('', 'NA'))
+PassengerId <- test$PassengerId
+glimpse(train)
+dim(train)
+```
+
+The train dataset has 12 columns as follows:
+
+1. `Survived`: survival (0 = No, 1 = Yes)
+2. `Pclass`: ticket class, a proxy for socio-economic status (1 = 1st, 2 = 2nd, 3 = 3rd)
+3. `Sex`: sex	
+4. `Age`: age in years	
+5. `Sibsp`: number of siblings / spouses aboard the Titanic	
+6. `Parch`: number of parents / children aboard the Titanic	
+7. `Ticket`: ticket number	
+8. `Fare`: passenger fare	
+9. `Cabin`: cabin number	
+10. `Embarked`: port of Embarkation (C = Cherbourg, Q = Queenstown, S = Southampton)
+11. `PassengerId`: passenger id
+12. `Name`: name
+
+# Data Cleaning
+
+First, let's check if there are any duplicated observations on train dataset.
+
+```{r}
+anyDuplicated(train)
+```
+
+Great! Now, we inspect missing values.
+
+```{r}
+colSums(is.na(train))
+colSums(is.na(test))
+```
+
+There are 4 features with missing values: `Cabin`, `Age`, `Embarked`, and `Fare`. We will impute all of them, each with special treatment.
+
+1. `Cabin`
+
+```{r}
+unique(train$Cabin)
+```
+
+As a categorical feature, `Cabin` has too many categories. Additionally, `Cabin` has too many missing values. The best simple way to impute `Cabin`'s missing values is to assign them a new category, let's say `X0`.
+
+```{r}
+train$Cabin <- replace_na(train$Cabin, 'X0')
+test$Cabin <- replace_na(test$Cabin, 'X0')
+```
+
+2. `Age`
+
+We can impute `Age` by mean or median, but we already have something to make a more educated guess: `Name`. The `Name` feature has values with formatting "[Surname], [Title] [Name]". We can extract [Surname] and [Title], and discard [Name] entirely since [Name] is unique for each `PassengerId` and doesn't add any additional information to our data. We then save [Surname] and [Title] as new features called `Surname` and `Title`. `Age` can be estimated based on `Title`, while `Surname` may be used in later analysis.
+
+```{r}
+train$Surname <- sapply(str_split(train$Name, ','), `[`, 1) %>% str_trim()
+temp <- sapply(str_split(train$Name, ','), `[`, 2)
+train$Title <- sapply(str_split(temp, '\\.'), `[`, 1) %>% str_trim()
+train <- train %>% select(-Name)
+
+test$Surname <- sapply(str_split(test$Name, ','), `[`, 1) %>% str_trim()
+temp <- sapply(str_split(test$Name, ','), `[`, 2)
+test$Title <- sapply(str_split(temp, '\\.'), `[`, 1) %>% str_trim()
+test <- test %>% select(-Name)
+```
+
+Let's see the values that take place in `Title`.
+
+```{r}
+unique(train$Title)
+unique(test$Title)
+```
+
+There is one `Title` in test dataset which doesn't exist in train dataset, that is Doña. Doña is a spanish `Title`, translates to Mrs in english. We can change Doña to Mrs right away.
+
+```{r}
+test[test$Title == 'Dona', 'Title'] = 'Mrs'
+```
+
+The strategy is to group `Age` by `Title` then take the median of each group. After that, assign the median to `Age`'s missing values as per the corresponding `Title`.
+
+```{r}
+age_by_title <- train %>% 
+  group_by(Title) %>% 
+  summarise(median = median(Age, na.rm = TRUE))
+
+train <- merge(train, age_by_title)
+train[is.na(train$Age), 'Age'] <- train[is.na(train$Age), 'median']
+train <- train %>% select(-median)
+
+test <- merge(test, age_by_title)
+test[is.na(test$Age), 'Age'] <- test[is.na(test$Age), 'median']
+test <- test %>% select(-median)
+```
+
+3. `Embarked`
+
+`Embarked` is a categorical features with mode 'S'.
+
+```{r}
+table(train$Embarked)
+```
+
+Since the number of missing values in `Embarked` is pretty small, we can simply impute them with its mode.
+
+```{r}
+train$Embarked <- replace_na(train$Embarked, 'S')
+test$Embarked <- replace_na(test$Embarked, 'S')
+```
+
+4. `Fare`
+
+Passenger `Fare` should correlate with `Pclass`: the higher the class, the higher the fare. Just like imputing `Age`, the strategy is to group `Fare` by `Pclass` then take the median of each group. After that, assign the median to `Fare`'s missing values as per the corresponding `Pclass`.
+
+```{r}
+fare_by_pclass <- train %>% 
+  group_by(Pclass) %>% 
+  summarise(median = median(Fare, na.rm = TRUE))
+
+train <- merge(train, fare_by_pclass)
+train[is.na(train$Fare), 'Fare'] <- train[is.na(train$Fare), 'median']
+train <- train %>% select(-median)
+
+test <- merge(test, fare_by_pclass)
+test[is.na(test$Fare), 'Fare'] <- test[is.na(test$Fare), 'median']
+test <- test %>% select(-median)
+```
+
+Now, let's revisit the missing values.
+
+```{r}
+colSums(is.na(train))
+colSums(is.na(test))
+```
+
+Awesome! No missing value exists in both dataset. Lastly, convert each feature class into its appropriate one.
+
+```{r}
+train <- train %>% 
+  mutate_at(vars(Pclass, Title, Survived, Sex, Cabin, Embarked), as.factor)
+
+test <- test %>% 
+  mutate_at(vars(Pclass, Title, Survived, Sex, Cabin, Embarked), as.factor)
+
+glimpse(train)
+```
+
+# Exploratory Data Analysis
+
+Quoting this [Wikipedia](https://en.wikipedia.org/wiki/Women_and_children_first) page:
+
+>"Women and children first" [...] is a code of conduct dating from 1852, whereby the lives of women and children were to be saved first in a life-threatening situation, typically abandoning ship, when survival resources such as lifeboats were limited.
+
+For starters, let's ignore the children and see what happens when we predict all women were survived and all men were deceased. To make it simple, we'll use accuracy metrics for the moment. We will consider other metrics later.
+
+```{r}
+train$gender_class <- train$Sex
+levels(train$gender_class) <- list('0' = 'male', '1' = 'female')
+Accuracy(train$gender_class, train$Survived)
+
+test$gender_class <- test$Sex
+levels(test$gender_class) <- list('0' = 'male', '1' = 'female')
+Accuracy(test$gender_class, test$Survived)
+```
+
+We got 79% accuracy on train dataset and 76% on test dataset. Not bad! It seems that it really was "women first" were to be saved in a life-threatening situation.
+
+Now, the question is: **which males survived and which females didn't?**
+
+1. Male
+
+```{r}
+ggplot(train %>% filter(Sex == 'male'),
+       aes(x = Age, group = Survived, fill = Survived)) +
+  geom_density(alpha = .5) + 
+  annotate('text', x = 5, y = .02, label = "Master") + 
+  ggtitle("Age Distribution of Male Passengers")
+```
+
+There's a clear tendency that males below the age of 15 years were more likely to survived. Since the maximum `Age` for people with `Master` as their `Title` is 12 years old as confirmed below, all of these `Master`s are included in 0-15 year old males range. Hence "women and children first" were prioritized in rescue?
+
+```{r}
+max(train %>% filter(Title == 'Master') %>% select(Age))
+```
+
+2. Female
+
+```{r}
+for (sex in c('male', 'female')) {
+  print(
+    ggplot(train %>% 
+             filter(Sex == sex) %>% 
+             group_by(Pclass, Survived) %>% 
+             count(name = 'passenger_count'),
+           aes(x = Pclass, y = passenger_count, fill = Survived)) + 
+      geom_bar(stat = 'identity', position = 'dodge') + 
+      ggtitle(glue::glue("{sex} Passenger Count per Pclass"))
+  )
+}
+```
+
+There's something going on here. Compared to `Pclass` 1 or 2, `female` with `Pclass` 3 has almost the same number of survived and not survived passengers. Maybe `Pclass` 3 was located at the most accident-prone area of the ship? If that so, why is the corresponding ratio of survival different for `male` with `Pclass` 3? This needs further investigation.
+
+3. Master and Female
+
+Finally, let's focus on `Master` and `female` passengers as suggested before that they are prioritized in the rescue. We would like to find if there are any relations between the two. Our approach is to see whether they are survived or deceased together as a family using `Surname` feature.
+
+```{r}
+all_survived <- c()
+all_deceased <- c()
+combined <- c()
+
+for (s in unique(train$Surname)) {
+  temp <- train %>% filter((Title == 'Master' | Sex == 'female') & (Surname == s))
+  if (nrow(temp) >= 2) {
+    if (all(temp['Survived'] == 1)) {
+      all_survived <- append(all_survived, s)
+    } else if (!any(temp['Survived'] == 1)) {
+      all_deceased <- append(all_deceased, s)
+    } else {
+      combined <- append(combined, s)
+    }
+  }
+}
+```
+
+```{r}
+cat('Family who all survived          :', sort(all_survived), '\n')
+cat('Family who are all deceased      :', sort(all_deceased), '\n')
+cat('Family both survived and deceased:', sort(combined), '\n')
+```
+
+As can be seen above, `Master` and `female` in a family tends to survive or decease together. Only four families who are not in accordance with this: Allison, Andersson, Asplund, and Carter. Let's dive inside.
+
+```{r}
+for (family in combined) {
+  print(
+    train %>% 
+      filter((Title == 'Master' | Sex == 'female') & (Surname == family)) %>% 
+      select(c('Surname', 'Title', 'Sex', 'Survived'))
+  )
+}
+```
+
+There are only 4 `Master`s in the whole train dataset who weren't survived or deceased together with their `female` family!
+
+# Metrics, Validation, and Class Imbalance
+
+We are only interested in predicting the correct classification of Titanic passenger's survival without emphasizing one of the class. Also, there is no specific impact in predicting false positives or false negatives in either class. Hence, the metrics we choose is accuracy.
+
+We validate the performance of our model simply by applying new data `test.csv` to it and see the accuracy result. We don't do k-fold cross validation since the data is small.
+
+Finally, we may check as follows that the positive and negative class is 38% and 62% of train dataset, respectively. This is still tolerable and can be considered as balanced.
+
+```{r}
+prop.table(table(train$Survived))
+```
+
+# Modeling
+
+We'll build and compare 2 models for our dataset: Logistic Regression and k-Nearest Neighbors.
+
+## Logistic Regression
+
+Before plugging in the data into the model, we can discard some features like `Cabin` and `gender_class` since they give little to no information to the data.
+
+```{r}
+train <- train %>% select(-c(Cabin, gender_class))
+test <- test %>% select(-c(Cabin, gender_class))
+
+glimpse(train)
+```
+
+Logistic Regression will be implemented with automatic feature selection using *backward elimination*. Starting from using all features, the *backward elimination* process will iteratively discard some and evaluate the model until it finds one with the lowest Akaike Information Criterion (AIC). Given a collection of models for the data, AIC estimates the quality of each model, relative to each of the other models based on information loss. Lower AIC means better model. We'll use `step()` function to apply *backward elimination* in a greedy manner.
+
+```{r}
+log <- glm(formula = Survived ~ . - PassengerId - Surname - Ticket, data = train, family = "binomial")
+step(log, direction = "backward")
+```
+
+Taking the best combination of features, the following model is obtained.
+
+```{r}
+step <- glm(formula = Survived ~ Pclass + Title + Age + SibSp + Parch + 
+    Fare, family = "binomial", data = train)
+```
+
+There are several assumptions need to be satisfied when we use Logistic Regression model:
+
+1. Multicollinearity: there is no strong correlation between predictors.
+
+This can be checked with Variance Inflation Factor (VIF). The VIF of a predictor is a measure for how easily it is predicted from a logistic regression using the other predictors. A general guideline is that a VIF larger than 5 or 10 is large, indicating that the model has problems estimating the coefficient. However, this in general does not degrade the quality of predictions. VIF can be calculated using `vif()` function from `car` library.
+
+```{r}
+vif(step)
+```
+
+GVIF is a generalized VIF for many coefficient. To make GVIFs comparable across dimensions, we better use GVIF^(1/(2*Df)) where Df is the number of coefficients in the subset of coefficients. For more detailed information, please refer to this [paper](http://www.tandfonline.com/doi/abs/10.1080/01621459.1992.10475190#.U2jkTFdMzTo). As we can see, all of these values are below 5 which means our model passes the multicollinearity test.
+
+2. Independent of Observations: there are no observations come from repeated measurements. This is clearly true for our dataset since each observation corresponds to a single passenger.
+
+3. Linearity of Predictor & Log of Odds. We can see the coefficient summary of our model as follows.
+
+```{r}
+data.frame(coefficient = round(coef(step),2),
+           odds_ratio = round(exp(coef(step)),2)) %>% 
+  arrange(odds_ratio)
+```
+
+The `odds_ratio` in the table above is the exponent of `coefficient` and represents the change of odds for a unit increase in the corresponding predictor variable, holding other variables constant. This means that holding all other variables constant, for one unit increase in `Age`, there will be a 0.97 times change in odds for a passenger to survive. This confirms that younger passengers are more likely to survive. Also, we can see that a lone traveler is also more likely to survive than a passenger departing with family. We can interpret this `odds_ratio` for each predictors which means our model passes this third assumption.
+
+Now we know that our Logistic Regression model satisfies all assumptions, we are ready to use the model and predict the result.
+
+```{r}
+lr_pred <- predict(step, train, type = "response")
+lr_pred <- ifelse(lr_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(lr_pred), train$Survived, positive = "1")
+
+lr_pred <- predict(step, test, type = "response")
+lr_pred <- ifelse(lr_pred > 0.5, 1, 0)
+lr <- confusionMatrix(as.factor(lr_pred), test$Survived, positive = "1")
+lr
+```
+
+Logistic Regression model gives 83% accuracy on train dataset and 77% accuracy on test dataset. We can see a slight overfit to train dataset. Remember that the classification based only on gender that we did earlier gives 76% accuracy on test dataset. This means Logistic Regression model only improve the prediction just a bit and isn't worth the effort. We will try to polish the model later.
+
+## k-Nearest Neighbors
+
+Since k-NN is a distance-based model, the dataset has to be normalized prior to modeling so that the model can treat each feature equally. In other words, if a feature has relatively big values compared to others, then it will dominantly influence the model in selecting a datapoint's neighbors. We will use `scale()` function to train dataset and apply the mean and standard deviation obtained to `scale()` test dataset.
+
+The second problem is that kNN is only applicable to numerical features, meaning that we can only select 4 features `Age`, `SibSp`, `Parch`, and `Fare` to be plugged in to the model.
+
+```{r}
+train_scaled <- scale(x = train %>% select(c('Age', 'SibSp', 'Parch', 'Fare')))
+test_scaled <- scale(x = test %>% select(c('Age', 'SibSp', 'Parch', 'Fare')),
+                     center = attr(train_scaled, "scaled:center"),
+                     scale = attr(train_scaled, "scaled:scale"))
+
+knn_pred_train <- knn(train = train_scaled,
+                      test = train_scaled,
+                      cl = train$Survived,
+                      k = sqrt(nrow(train_scaled)))
+
+knn_pred <- knn(train = train_scaled,
+               test = test_scaled,
+               cl = train$Survived,
+               k = sqrt(nrow(train_scaled)))
+
+confusionMatrix(knn_pred_train, train$Survived, positive = "1")
+knn <- confusionMatrix(knn_pred, test$Survived, positive = "1")
+knn
+```
+
+Clearly 4 features are not enough. The kNN model gives poor result with 73% accuracy on train dataset and 69% accuracy on test dataset, even worse than the previous gender-only classification.
+
+# Feature Engineering
+
+Now we are attempting to improve the performance of our models above. First, let's concatenate `train` and `test` and save the result to an object `df`. Then, make a new feature `FamilySize` which is just the total sum of `Sibsp` and `Parch`.
+
+```{r}
+test <- test %>% arrange(PassengerId)
+test_Survived <- test$Survived
+test_wo_Survived <- data.frame(test)
+test_wo_Survived$Survived <- NA
+df <- rbind(train, test_wo_Survived)
+df$FamilySize <- df$SibSp + df$Parch
+df <- df %>% arrange(PassengerId)
+```
+
+We can leverage our finding from EDA that families (especially `Master` and `female`) tends to survive or decease together. Make a new feature `FamilySurvival` which takes the value of 0, 1, or 0.5 as follows:
+
+1. Fill `FamilySurvival` with default value 0.5 (this 0.5 means we are not sure if there's any other family members survived or not for a particular passenger).
+2. Group `df` by `Surname` and `Fare`, discard any group that consists of only one person.
+3. Iterate each passenger in each group:
+  
+  * if there is any survival other than the passenger in their group, change that passenger `FamilySurvival` to 1
+  * else if there is anyone who didn't survive other than the passenger in their group, change that passenger `FamilySurvival` to 0
+  * else keep that passenger `FamilySurvival` as 0.5
+
+```{r}
+DEFAULT_SURVIVAL_VALUE <- 0.5
+df$FamilySurvival <- DEFAULT_SURVIVAL_VALUE
+
+df$Survived <- as.integer(df$Survived) - 1
+
+groups <- split(df, list(df$Surname, df$Fare), drop = TRUE)
+for (grp_df in groups) {
+  if (nrow(grp_df != 1)) {
+    for (ind in 1:nrow(grp_df)) {
+      smax <- max(grp_df[-ind, 'Survived'], na.rm = TRUE)
+      smin <- min(grp_df[-ind, 'Survived'], na.rm = TRUE)
+      passId <- grp_df[ind, 'PassengerId']
+      if (smax == 1.0) {
+        df[df$PassengerId == passId, 'FamilySurvival'] <- 1
+      } else if (smin == 0.0) {
+        df[df$PassengerId == passId, 'FamilySurvival'] <- 0
+      }
+    }
+  }
+}
+
+cat("Number of passengers with family survival information:", 
+    nrow(df[df$FamilySurvival != 0.5, ]))
+```
+
+In the end, there are 420 people of all passengers in `df` who have `FamilySurvival` information (either 0 or 1). But we are not done yet. We can gather more `FamilySurvival` information from `Ticket` as follow.
+
+1. Group `df` by `Ticket`, discard any group that consists of only one person.
+2. Iterate each passenger in each group that has `FamilySurvival` other than 1:
+  
+  * if there is any survival other than the passenger in their group, change that passenger `FamilySurvival` to 1
+  * else if there is anyone who didn't survive other than the passenger in their group, change that passenger `FamilySurvival` to 0
+  * else keep that passenger `FamilySurvival` as it is
+
+```{r}
+groups <- split(df, df$Ticket, drop = TRUE)
+for (grp_df in groups) {
+  if (nrow(grp_df != 1)) {
+    for (ind in 1:nrow(grp_df)) {
+      if (grp_df[ind, 'FamilySurvival'] != 1.0) {
+        smax <- max(grp_df[-ind, 'Survived'], na.rm = TRUE)
+        smin <- min(grp_df[-ind, 'Survived'], na.rm = TRUE)
+        passId <- grp_df[ind, 'PassengerId']
+        if (smax == 1.0) {
+          df[df$PassengerId == passId, 'FamilySurvival'] <- 1
+        } else if (smin == 0.0) {
+          df[df$PassengerId == passId, 'FamilySurvival'] <- 0
+        }
+      }
+    }
+  }
+}
+
+cat("Number of passenger with family survival information:",
+    nrow(df[df$FamilySurvival != 0.5, ]))
+```
+
+Now the number of passenger with `FamilySurvival` information increased to 546 people.
+
+Then, let's convert `Sex` to integer and discretize `Fare` and `Age` features into 5 categories, saving them as new features `FareBin` and `AgeBin` respectively.
+
+```{r}
+df$FareBin <- ntile(x = df$Fare, n = 5)
+df$AgeBin <- ntile(x = df$Age, n = 5)
+df$Sex <- as.integer(df$Sex) - 1
+```
+
+Here's the final `df` dataset.
+
+```{r}
+glimpse(df)
+```
+
+# Modeling (Part 2)
+
+## Logistic Regression
+
+First of all, reproduce `train` and `test` from `df`. Don't forget to change feature class appropriately.
+
+```{r}
+train <- df %>% 
+  mutate_at(c('Survived', 'Sex', 'FareBin', 'AgeBin'), as.factor) %>% 
+  slice_head(n = nrow(train))
+
+test <- df %>% 
+  mutate_at(c('Survived', 'Sex', 'FareBin', 'AgeBin'), as.factor) %>% 
+  slice_tail(n = nrow(test))
+
+test$Survived <- test_Survived
+```
+
+Again, we rely on `step()` function as a feature selection method.
+
+```{r}
+log <- glm(formula = Survived ~ . - PassengerId - Surname - Ticket, data = train, family = "binomial")
+step(log, direction = "backward")
+```
+
+Here's the best model found by *backward elimination* process above.
+
+```{r}
+step <- glm(formula = Survived ~ Pclass + Title + Age + SibSp + Parch + 
+    FamilySurvival, family = "binomial", data = train)
+```
+
+Again, we can check whether this model satisties all three assumptions as explained before.
+
+```{r}
+vif(step)
+
+data.frame(coefficient = round(coef(step),2),
+           odds_ratio = round(exp(coef(step)),2)) %>% 
+  arrange(odds_ratio)
+```
+
+Great! Now, prediction time.
+
+```{r}
+lr_pred <- predict(step, train, type = "response")
+lr_pred <- ifelse(lr_pred > 0.5, 1, 0)
+confusionMatrix(as.factor(lr_pred), as.factor(train$Survived), positive = "1")
+
+lr_pred <- predict(step, test, type = "response")
+lr_pred <- ifelse(lr_pred > 0.5, 1, 0)
+lr_fe <- confusionMatrix(as.factor(lr_pred), as.factor(test$Survived), positive = "1")
+lr_fe
+```
+
+Awesome! We successfully increased the performance of Logistic Regression model to 85% accuracy on train dataset and 79% accuracy on test dataset.
+
+## k-Nearest Neighbors
+
+Let's peek `df` one more time.
+
+```{r}
+glimpse(df)
+```
+
+Reproduce `train` and `test` from `df`. This time, we will select features manually following the rules below.
+
+1. Drop `PassengerId` as it adds no information to the data
+2. Drop `Title` as it is assumed to has been captured by `Age` and `Sex`
+3. Drop `Surname` and `Ticket` as they are already used to determine `FamilySurvival`
+4. Drop `SibSp` and `Parch` as they are combined to create `FamilySize`
+5. Drop `Age` and `Fare` as they are already represented by `AgeBin` and `FareBin`
+6. Drop `Embarked` as it serves little information to the data
+
+Eventually, we are left with 7 features: `Survived`, `Pclass`, `Sex`, `FamilySize`, `FamilySurvival`, `FareBin`, and `AgeBin`, with `Survived` as the target feature. Since we are working with kNN, we convert all of these features to numeric. Please note that numerical conversion still makes sense for `Pclass`, `FareBin`, and `AgeBin` since they have ordinal meaning, but it is not the case for `Sex`. However, for now we'll just continue and see what happens.
+
+```{r}
+train <- df %>% 
+  select(c(Survived, Pclass, Sex, FamilySize, FamilySurvival, FareBin, AgeBin)) %>% 
+  mutate_all(., as.numeric) %>% 
+  slice_head(n = nrow(train))
+
+test <- df %>% 
+  select(c(Survived, Pclass, Sex, FamilySize, FamilySurvival, FareBin, AgeBin)) %>% 
+  mutate_all(., as.numeric) %>% 
+  slice_tail(n = nrow(test))
+
+test$Survived <- test_Survived
+```
+
+As before, we perform normalization to the predictors, fit data into the model, and predict the result.
+
+```{r}
+train_scaled <- scale(x = train %>% select(-Survived))
+test_scaled <- scale(x = test %>% select(-Survived),
+                     center = attr(train_scaled, "scaled:center"),
+                     scale = attr(train_scaled, "scaled:scale"))
+
+knn_pred_train <- knn(train = train_scaled,
+                      test = train_scaled,
+                      cl = train$Survived,
+                      k = sqrt(nrow(train_scaled)))
+
+knn_pred <- knn(train = train_scaled,
+               test = test_scaled,
+               cl = train$Survived,
+               k = sqrt(nrow(train_scaled)))
+
+confusionMatrix(knn_pred_train, as.factor(train$Survived), positive = "1")
+knn_fe <- confusionMatrix(knn_pred, as.factor(test$Survived), positive = "1")
+knn_fe
+```
+
+kNN model reaches 84% accuracy on train dataset, slightly lower than Logistic Regression model, but performs really well on test dataset as well with 80% accuracy. We found the winner here!
+
+Finally, let's make the submission file.
+
+```{r}
+submission <- data.frame(PassengerId, Survived = knn_pred)
+write.csv(submission, 'submission.csv', row.names = FALSE)
+```
+
+# Conclusion
+
+```{r}
+rbind(
+  "Logistic Regression" = lr$overall['Accuracy'], 
+  "k-Nearest Neighbors" = knn$overall['Accuracy'], 
+  "Logistic Regression with Feature Engineering" = lr_fe$overall['Accuracy'], 
+  "k-Nearest Neighbors with Feature Engineering" = knn_fe$overall['Accuracy']
+)
+```
+
+kNN model is able to reach as high as 80% accuracy in predicting survival of Titanic passengers, beating Logistic Regression model. However, kNN alone has a really poor performance, even worse than a simple gender-only based classification. We see that feature engineering is really needed to boost kNN model performance to the top.
+
+# Endnote
+
+Hi! Thank you for reaching the end. This has been one of many notebooks to come. You can always read more <a style="font-weight:bold" href="https://dwiuzila.medium.com/">HERE</a>.
+
+Have anything in mind? Leave a comment below. Find this notebook helpful? Please kindly upvote :)
