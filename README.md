@@ -7,6 +7,15 @@ import requests
 url = "https://example.com/titanic_data.csv"
 response = requests.get(url)
 
+if response.status_code == 200:
+    print("Data downloaded successfully!")
+else:
+    print(f"Error downloading data: {response.status_code}")downloaded_data = response.content
+# or
+downloaded_data = response.text
+
+# Then process the downloaded data further (e.g., read the CSV file)
+    
 # Save the data to a local file
 with open("titanic_data.csv", "wb") as f:
     f.write(response.content)
